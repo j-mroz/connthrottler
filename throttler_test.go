@@ -28,14 +28,15 @@ func TestBytesUnit_String(t *testing.T) {
 }
 
 func TestWriteLimiter_Write_Copy(t *testing.T) {
-	payload := make([]byte, 1*GiB)
+	payload := make([]byte, 10*KiB)
+
 	tests := []struct {
 		bps           BytesUnit
 		burst         BytesUnit
 		wantWriteSize int
 		wantErr       bool
 	}{
-		{bps: 1 * KiB, burst: 1 * KiB, wantWriteSize: int(1 * GiB), wantErr: false},
+		{bps: 1 * KiB, burst: 1 * KiB, wantWriteSize: len(payload), wantErr: false},
 	}
 
 	for _, tt := range tests {
@@ -46,6 +47,38 @@ func TestWriteLimiter_Write_Copy(t *testing.T) {
 			wl := NewWriteLimiter(&writeSink, tt.bps, tt.burst)
 
 			written, err := io.Copy(wl, bytes.NewReader(payload))
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("io.Copy error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if written != int64(tt.wantWriteSize) {
+				t.Errorf("io.Copy write = %v, want %v", written, tt.wantWriteSize)
+			}
+		})
+	}
+}
+
+func TestWriteLimiter_Read_InIoCopy(t *testing.T) {
+	payload := make([]byte, 10*KiB)
+
+	tests := []struct {
+		bps           BytesUnit
+		burst         BytesUnit
+		wantWriteSize int
+		wantErr       bool
+	}{
+		{bps: 1 * KiB, burst: 1 * KiB, wantWriteSize: len(payload), wantErr: false},
+	}
+
+	for _, tt := range tests {
+		testName := fmt.Sprintf("limit-%s__burst-%s", tt.bps, tt.burst)
+		t.Run(testName, func(t *testing.T) {
+			readSource := bytes.NewReader(payload)
+			readLimiter := NewReadLimiter(readSource, tt.bps, tt.burst)
+
+			var writeSink bytes.Buffer
+			written, err := io.Copy(&writeSink, readLimiter)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("io.Copy error = %v, wantErr %v", err, tt.wantErr)
