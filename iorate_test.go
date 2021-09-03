@@ -1,4 +1,4 @@
-package connthrottler
+package iorate
 
 import (
 	"bytes"
@@ -107,7 +107,6 @@ func Benchmark_Reader(b *testing.B) {
 
 	for _, bm := range benchmarks {
 		testName := fmt.Sprintf("payload-%s__limit-%s__burst-%s", bm.payloadSize, bm.bps, bm.burst)
-
 		var writeSink bytes.Buffer
 		writeSink.Grow(int(bm.payloadSize))
 		payload := make([]byte, bm.payloadSize)

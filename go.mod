@@ -1,4 +1,4 @@
-module github.com/j-mroz/connthrottler
+module github.com/j-mroz/iorate
 
 go 1.16
 
