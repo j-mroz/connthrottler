@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -109,4 +111,50 @@ func (rl *ReadLimiter) Read(b []byte) (n int, err error) {
 		return rl.reader.Read(b[:readSize])
 	}
 	return 0, ErrNoBurstAvilable
+}
+
+// ListenerLimiter controlls how often read and writes bandwitch for
+// connections spawned by a listener.
+type ListenerLimiter struct {
+	listener            net.Listener
+	connections         sync.Map
+	bpsMu               sync.RWMutex
+	bpsPerListenerLimit ByteSize
+	bpsPerConnLimit     ByteSize
+}
+
+func NewListenerLimiter(l net.Listener) *ListenerLimiter {
+	return &ListenerLimiter{
+		listener: l,
+	}
+}
+
+// Accept waits for and returns the next connection to the listener.
+func (l *ListenerLimiter) Accept() (net.Conn, error) {
+	conn, err := l.listener.Accept()
+	l.connections.Store(conn, 1)
+	return conn, err
+}
+
+// Close closes the listener.
+// Any blocked Accept operations will be unblocked and return errors.
+func (l *ListenerLimiter) Close() error {
+	return l.listener.Close()
+}
+
+// Addr returns the listener's network address.
+func (l *ListenerLimiter) Addr() net.Addr {
+	return l.listener.Addr()
+}
+
+func (l *ListenerLimiter) onConnClose(conn net.Conn) {
+	l.connections.Delete(conn)
+}
+
+// SetBandwithLimits limits the per listener and per connection bytes per second.
+func (l *ListenerLimiter) SetBandwithLimits(bpsPerListener, bpsPerConn ByteSize) {
+	l.bpsMu.Lock()
+	defer l.bpsMu.Unlock()
+	l.bpsPerListenerLimit = bpsPerListener
+	l.bpsPerConnLimit = bpsPerConn
 }

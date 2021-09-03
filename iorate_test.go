@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"testing"
 	"time"
 )
@@ -42,12 +43,9 @@ type readWriteTestResult struct {
 }
 
 var readerWriterTests = []readWriteTestBenchConfig{
-	{bps: 1 * KiB, burst: 512 * B, payloadSize: 2 * KiB, wantErr: false},
-	{bps: 4 * KiB, burst: 512 * B, payloadSize: 2 * KiB, wantErr: false},
-	{bps: 1 * KiB, burst: 512 * B, payloadSize: 10 * KiB, wantErr: false},
-	{bps: 4 * KiB, burst: 512 * B, payloadSize: 10 * KiB, wantErr: false},
-	{bps: 1 * MiB, burst: 512 * B, payloadSize: 10 * MiB, wantErr: false},
-	{bps: 1 * MiB, burst: 2 * KiB, payloadSize: 10 * MiB, wantErr: false},
+	{bps: 1 * KiB, burst: 512 * B, payloadSize: 4 * KiB, wantErr: false},
+	{bps: 250 * KiB, burst: 32 * KiB, payloadSize: 1 * MiB, wantErr: false},
+	{bps: 1 * MiB, burst: 32 * KiB, payloadSize: 10 * MiB, wantErr: false},
 }
 
 func TestWriteLimiter_Write_InIoCopy(t *testing.T) {
@@ -187,4 +185,48 @@ func readWriteBenchmark(b *testing.B, r io.Reader, w io.Writer) (throughput floa
 	written, _ := io.Copy(w, r)
 	copyTime := time.Since(copyStartTime)
 	return float64(written) / copyTime.Seconds()
+}
+
+func TestListenerLimiter_Accept(t *testing.T) {
+	l := &MockListener{}
+	listenerLimiter := NewListenerLimiter(l)
+	conn, _ := listenerLimiter.Accept()
+
+	_, connStored := listenerLimiter.connections.Load(conn)
+	if !connStored {
+		t.Errorf("ListenerLimiter.Accept() should store accepted connections")
+	}
+}
+
+func TestListenerLimiter_SetBandwithLimits(t *testing.T) {
+	l := &MockListener{}
+	listenerLimiter := NewListenerLimiter(l)
+
+	bpsPerListenerLimit := ByteSize(100 * KiB)
+	bpsPerConnLimit := ByteSize(2 * KiB)
+
+	listenerLimiter.SetBandwithLimits(bpsPerListenerLimit, bpsPerConnLimit)
+
+	if bpsPerListenerLimit != listenerLimiter.bpsPerListenerLimit ||
+		bpsPerConnLimit != listenerLimiter.bpsPerConnLimit {
+		t.Errorf("ListenerLimiter.SetBandwithLimits limits sets incorrectly")
+	}
+
+	//TODO: add connection limits when connection is implemented
+}
+
+type MockListener struct {
+	addr net.Addr
+}
+
+func (l *MockListener) Accept() (net.Conn, error) {
+	return nil, nil
+}
+
+func (l *MockListener) Close() error {
+	return nil
+}
+
+func (l *MockListener) Addr() net.Addr {
+	return l.addr
 }
