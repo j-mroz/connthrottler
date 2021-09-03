@@ -2,9 +2,11 @@ package iorate
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -29,109 +31,199 @@ func TestBytesUnit_String(t *testing.T) {
 	}
 }
 
+func TestReader_Read_SharedLimit(t *testing.T) {
+	payload := []byte("0123456789")
+	bps := 2 * B
+	expectReadSize := 2
+	limiter := NewBandwidthLimiter(bps)
+	limitedReader := NewReaderWithSharedLimit(bytes.NewReader(payload), limiter)
+
+	buff := make([]byte, 32*1024)
+	n, err := limitedReader.Read(buff)
+
+	if n != expectReadSize {
+		t.Errorf("Reader.Read() = %v, want %v", n, expectReadSize)
+	}
+	if err != nil {
+		t.Errorf("Reader.Read() error = %v", err)
+	}
+}
+
+func TestReader_Read_ChainedReaders(t *testing.T) {
+	payload := []byte("0123456789")
+	expectRead := 3
+
+	reader1 := NewReader(bytes.NewReader(payload), 5*B)
+	reader2 := NewReader(reader1, 3*B)
+	reader3 := NewReader(reader2, 10*B)
+
+	buff := make([]byte, 32*1024)
+	read, err := reader3.Read(buff)
+
+	assertEqual(t, read, expectRead,
+		"Reader.Read() = %v, want %v", read, expectRead)
+	if err != nil {
+		t.Errorf("Reader.Read() error = %v", err)
+	}
+}
+
+func TestWriter_Write(t *testing.T) {
+	type given struct {
+		payload string
+		bps     ByteSize
+	}
+	type expect struct {
+		fullWrite bool
+		err       error
+	}
+	tests := []struct {
+		given  given
+		expect expect
+	}{
+		{
+			given{payload: "", bps: 0 * KiB},
+			expect{fullWrite: false, err: ErrNoBurstAvilable},
+		}, {
+			given{payload: "", bps: 1 * KiB},
+			expect{fullWrite: true, err: nil},
+		}, {
+			given{payload: "01234567890", bps: 1 * B},
+			expect{fullWrite: false, err: nil},
+		}, {
+			given{payload: "01234567890", bps: 1 * KiB},
+			expect{fullWrite: true, err: nil},
+		},
+	}
+
+	for _, tt := range tests {
+		testName := fmt.Sprintf("payload:<%s>_limit:%s",
+			tt.given.payload, tt.given.bps)
+
+		t.Run(testName, func(t *testing.T) {
+			var writeSink bytes.Buffer
+			limitedWriter := NewWriter(&writeSink, tt.given.bps)
+
+			payload := []byte(tt.given.payload)
+			n, err := limitedWriter.Write([]byte(payload))
+			expectN := len(payload)
+			if n != expectN {
+				t.Errorf("Writer.Write() = %v, want %v", n, expectN)
+			}
+			if !errors.Is(err, tt.expect.err) {
+				t.Errorf("Writer.Write() error = %v, want err %v",
+					err, tt.expect.err)
+			}
+		})
+	}
+}
+
 type readWriteTestBenchConfig struct {
 	bps         ByteSize
-	burst       ByteSize
 	payloadSize ByteSize
+	chain       ByteSize // enabled if not 0
 	wantErr     bool
 	r           io.Reader
 	w           io.Writer
 }
 
-type readWriteTestResult struct {
-	throughput float64
-}
+// var readerWriterTests = []readWriteTestBenchConfig{
+// 	{bps: 1 * KiB, payloadSize: 4 * KiB, wantErr: false},
+// 	{bps: 1 * KiB, chain: 1 * KiB, payloadSize: 4 * KiB, wantErr: false},
+// 	{bps: 1 * KiB, chain: 800 * B, payloadSize: 4 * KiB, wantErr: false},
+// 	{bps: 2 * KiB, payloadSize: 4 * KiB, wantErr: false},
+// 	{bps: 250 * KiB, payloadSize: 1 * MiB, wantErr: false},
+// 	{bps: 250 * KiB, chain: 200 * KiB, payloadSize: 1 * MiB, wantErr: false},
 
-var readerWriterTests = []readWriteTestBenchConfig{
-	{bps: 1 * KiB, burst: 512 * B, payloadSize: 4 * KiB, wantErr: false},
-	{bps: 250 * KiB, burst: 32 * KiB, payloadSize: 1 * MiB, wantErr: false},
-	{bps: 1 * MiB, burst: 32 * KiB, payloadSize: 10 * MiB, wantErr: false},
-}
+// 	{bps: 1 * MiB, payloadSize: 4 * MiB, wantErr: false},
+// }
 
-func TestWriteLimiter_Write_InIoCopy(t *testing.T) {
-	var writeSink bytes.Buffer
+// func TestWriter_Write_InIoCopy(t *testing.T) {
 
-	for _, tt := range readerWriterTests {
-		testName := fmt.Sprintf("payload-%s__limit-%s__burst-%s", tt.payloadSize, tt.bps, tt.burst)
-		payload := make([]byte, tt.payloadSize)
-		writeSink.Grow(int(tt.payloadSize))
-		writeSink.Reset()
+// 	for _, tt := range readerWriterTests {
 
-		t.Run(testName, func(t *testing.T) {
-			tt.w = NewWriteLimiter(&writeSink, tt.bps, tt.burst)
-			tt.r = bytes.NewReader(payload)
-			readWriteTest(t, &tt)
-		})
-	}
-}
+// 		testName := fmt.Sprintf("payload:%s_limit:%s", tt.payloadSize, tt.bps)
 
-func TestWriteLimiter_Read_InIoCopy(t *testing.T) {
-	var writeSink bytes.Buffer
+// 		t.Run(testName, func(t *testing.T) {
+// 			// t.Parallel()
 
-	for _, tt := range readerWriterTests {
-		testName := fmt.Sprintf("payload-%s__limit-%s__burst-%s", tt.payloadSize, tt.bps, tt.burst)
-		payload := make([]byte, tt.payloadSize)
+// 			var writeSink bytes.Buffer
+// 			writeSink.Grow(int(tt.payloadSize))
+// 			payload := make([]byte, tt.payloadSize)
+// 			writeLimiter := NewWriter(&writeSink, tt.bps)
+// 			tt.w = writeLimiter
+// 			tt.r = bytes.NewReader(payload)
+// 			readWriteTest(t, &tt)
+// 		})
+// 	}
+// }
 
-		t.Run(testName, func(t *testing.T) {
-			readSource := bytes.NewReader(payload)
-			writeSink.Grow(int(tt.payloadSize))
-			writeSink.Reset()
-			tt.r = NewReadLimiter(readSource, tt.bps, tt.burst)
-			tt.w = &writeSink
-			readWriteTest(t, &tt)
-		})
-	}
-}
+// func TestReader_Read_InIoCopy(t *testing.T) {
 
-func readWriteTest(t *testing.T, args *readWriteTestBenchConfig) {
-	copyStartTime := time.Now()
-	written, err := io.Copy(args.w, args.r)
-	copyTime := time.Since(copyStartTime)
+// 	for _, tt := range readerWriterTests {
+// 		testName := fmt.Sprintf("payload:%s_limit:%s", tt.payloadSize, tt.bps)
+// 		if tt.chain != 0 {
+// 			testName += "_chain:" + tt.chain.String()
+// 		}
+// 		t.Run(testName, func(t *testing.T) {
+// 			// t.Parallel()
 
-	if (err != nil) != args.wantErr {
-		t.Errorf("io.Copy error = %v, wantErr %v", err, args.wantErr)
-		return
-	}
-	if written != int64(args.payloadSize) {
-		t.Errorf("io.Copy write = %v, want %v", written, args.payloadSize)
-	}
+// 			var writeSink bytes.Buffer
+// 			writeSink.Grow(int(tt.payloadSize))
+// 			payload := make([]byte, tt.payloadSize)
+// 			readSource := bytes.NewReader(payload)
 
-	throughput := float64(written) / copyTime.Seconds()
-	minBps := float64(args.bps) * 0.95
-	maxBps := float64(args.bps) * 1.05
-	if !(minBps <= throughput) || !(throughput <= maxBps) {
-		t.Errorf("throughput = %f, accepted range [%f, %f]", throughput, minBps, maxBps)
-	}
-}
+// 			r := NewReader(readSource, tt.bps)
+// 			if tt.chain != 0 {
+// 				r = NewReader(r, tt.chain)
+// 			}
+// 			tt.r = r
+// 			tt.w = &writeSink
+// 			readWriteTest(t, &tt)
+// 		})
+// 	}
+// }
+
+// func readWriteTest(t *testing.T, args *readWriteTestBenchConfig) {
+// 	copyStartTime := time.Now()
+// 	written, err := io.Copy(args.w, args.r)
+// 	copyTime := time.Since(copyStartTime)
+
+// 	if (err != nil) != args.wantErr {
+// 		t.Errorf("io.Copy error = %v, wantErr %v", err, args.wantErr)
+// 		return
+// 	}
+// 	if written != int64(args.payloadSize) {
+// 		t.Errorf("io.Copy write = %v, want %v", written, args.payloadSize)
+// 	}
+
+// 	throughput := float64(written) / copyTime.Seconds()
+// 	minBps := float64(args.bps) * 0.95
+// 	maxBps := float64(args.bps) * 1.05
+// 	if !(minBps <= throughput) || !(throughput <= maxBps) {
+// 		t.Errorf("throughput = %f, accepted range [%f, %f]", throughput, minBps, maxBps)
+// 	}
+// }
 
 // Benchamarks for determining optimal optimal bps and burst ratio
 var readWriteBenchmarks = []readWriteTestBenchConfig{
-	{bps: 1 * KiB, burst: 512 * B, payloadSize: 4 * KiB},
-	{bps: 1 * KiB, burst: 1 * KiB, payloadSize: 4 * KiB},
-
-	{bps: 250 * KiB, burst: 1 * KiB, payloadSize: 4 * MiB},
-	{bps: 250 * KiB, burst: 32 * KiB, payloadSize: 4 * MiB},
-	{bps: 250 * KiB, burst: 250 * KiB, payloadSize: 4 * MiB},
-
-	{bps: 1 * MiB, burst: 1 * KiB, payloadSize: 4 * MiB},
-	{bps: 1 * MiB, burst: 32 * KiB, payloadSize: 4 * MiB},
-	{bps: 1 * MiB, burst: 250 * KiB, payloadSize: 4 * MiB},
-	{bps: 1 * MiB, burst: 1 * MiB, payloadSize: 4 * MiB},
-
-	// 	{bps: 250 * MiB, burst: 30 * KiB, payloadSize: 1 * GiB},
-	// 	{bps: 250 * MiB, burst: 250 * KiB, payloadSize: 1 * GiB},
-	// 	{bps: 250 * MiB, burst: 1 * MiB, payloadSize: 1 * GiB},
-	// 	{bps: 250 * MiB, burst: 5 * MiB, payloadSize: 1 * GiB},
-	// 	{bps: 250 * MiB, burst: 1 * MiB, payloadSize: 1 * GiB},
-	// 	{bps: 250 * MiB, burst: 5 * MiB, payloadSize: 1 * GiB},
-	// 	{bps: 250 * MiB, burst: 25 * MiB, payloadSize: 1 * GiB},
+	{bps: 128 * B, payloadSize: 200 * B},
+	{bps: 1 * KiB, payloadSize: 4 * KiB},
+	{bps: 1 * KiB, chain: 800 * B, payloadSize: 4 * KiB, wantErr: false},
+	{bps: 250 * KiB, chain: 200 * KiB, payloadSize: 4 * MiB},
+	{bps: 250 * KiB, payloadSize: 4 * MiB},
+	{bps: 1 * MiB, payloadSize: 4 * MiB},
+	// {bps: 250 * MiB, payloadSize: 1 * GiB},
 }
 
 func Benchmark_Reader(b *testing.B) {
 	var writeSink bytes.Buffer
 
 	for _, bm := range readWriteBenchmarks {
-		testName := fmt.Sprintf("payload-%s__limit-%s__burst-%s", bm.payloadSize, bm.bps, bm.burst)
+		chainedLimit := ""
+		if bm.chain != 0 {
+			chainedLimit = bm.chain.String()
+		}
+		testName := fmt.Sprintf("payload:%10s_limits:[%10s,%10s]", bm.payloadSize, bm.bps, chainedLimit)
 
 		writeSink.Grow(int(bm.payloadSize))
 		payload := make([]byte, bm.payloadSize)
@@ -143,12 +235,15 @@ func Benchmark_Reader(b *testing.B) {
 
 			for runN := 0; runN < b.N; runN++ {
 				writeSink.Reset()
-				readLimiter := NewReadLimiter(bytes.NewReader(payload), bm.bps, bm.burst)
+				readLimiter := NewReader(bytes.NewReader(payload), bm.bps)
+				if bm.chain != 0 {
+					readLimiter = NewReader(readLimiter, bm.chain)
+				}
 				avgTroughput += readWriteBenchmark(b, readLimiter, &writeSink)
 			}
 
 			avgTroughput /= float64(b.N)
-			b.ReportMetric(avgTroughput, "B/s")
+			b.ReportMetric(avgTroughput, "Bps")
 		})
 	}
 }
@@ -157,7 +252,11 @@ func Benchmark_Writer(b *testing.B) {
 	var writeSink bytes.Buffer
 
 	for _, bm := range readWriteBenchmarks {
-		testName := fmt.Sprintf("payload-%s__limit-%s__burst-%s", bm.payloadSize, bm.bps, bm.burst)
+		chainedLimit := ""
+		if bm.chain != 0 {
+			chainedLimit = bm.chain.String()
+		}
+		testName := fmt.Sprintf("payload:%10s_limits:[%10s,%10s]", bm.payloadSize, bm.bps, chainedLimit)
 
 		writeSink.Grow(int(bm.payloadSize))
 		payload := make([]byte, bm.payloadSize)
@@ -170,12 +269,16 @@ func Benchmark_Writer(b *testing.B) {
 			for runN := 0; runN < b.N; runN++ {
 				writeSink.Reset()
 				payloadReader := bytes.NewReader(payload)
-				writeLimiter := NewWriteLimiter(&writeSink, bm.bps, bm.burst)
+				writeLimiter := NewWriter(&writeSink, bm.bps)
+				if bm.chain != 0 {
+					writeLimiter = NewWriter(&writeSink, bm.bps)
+					writeLimiter = NewWriter(writeLimiter, bm.chain)
+				}
 				avgTroughput += readWriteBenchmark(b, payloadReader, writeLimiter)
 			}
 
 			avgTroughput /= float64(b.N)
-			b.ReportMetric(avgTroughput, "B/s")
+			b.ReportMetric(avgTroughput, "Bps")
 		})
 	}
 }
@@ -187,46 +290,209 @@ func readWriteBenchmark(b *testing.B, r io.Reader, w io.Writer) (throughput floa
 	return float64(written) / copyTime.Seconds()
 }
 
-func TestListenerLimiter_Accept(t *testing.T) {
-	l := &MockListener{}
-	listenerLimiter := NewListenerLimiter(l)
-	conn, _ := listenerLimiter.Accept()
+func TestListener_Accept(t *testing.T) {
+	limiter := NewListener(&MockListener{}).(*limitedListener)
+	conn, _ := limiter.Accept()
 
-	_, connStored := listenerLimiter.connections.Load(conn)
+	_, connStored := limiter.connections.Load(conn)
 	if !connStored {
 		t.Errorf("ListenerLimiter.Accept() should store accepted connections")
 	}
 }
 
-func TestListenerLimiter_SetBandwithLimits(t *testing.T) {
-	l := &MockListener{}
-	listenerLimiter := NewListenerLimiter(l)
+func TestListener_ConnClose(t *testing.T) {
+	listener := NewListener(&MockListener{}).(*limitedListener)
+	conn, _ := listener.Accept()
+	conn.Close()
+	_, connStored := listener.connections.Load(conn)
+	if connStored {
+		t.Errorf("connection on close should remove itself from a listener")
+	}
+}
 
-	bpsPerListenerLimit := ByteSize(100 * KiB)
-	bpsPerConnLimit := ByteSize(2 * KiB)
+func TestListener_SetLimits_OnAccept(t *testing.T) {
+	bpsPerListenerLimit := 100 * KiB
+	bpsPerConnLimit := 2 * KiB
 
-	listenerLimiter.SetBandwithLimits(bpsPerListenerLimit, bpsPerConnLimit)
+	listener := NewListener(&MockListener{}).(*limitedListener)
+	listener.SetBandwithLimits(bpsPerListenerLimit, bpsPerConnLimit)
 
-	if bpsPerListenerLimit != listenerLimiter.bpsPerListenerLimit ||
-		bpsPerConnLimit != listenerLimiter.bpsPerConnLimit {
-		t.Errorf("ListenerLimiter.SetBandwithLimits limits sets incorrectly")
+	gotPerListenerLimit, gotPerConnLimit := listener.BandwithLimits()
+	if bpsPerListenerLimit != gotPerListenerLimit ||
+		bpsPerConnLimit != gotPerConnLimit {
+		t.Errorf("Listener.SetLimits limits sets incorrectly")
 	}
 
-	//TODO: add connection limits when connection is implemented
+	conn, _ := listener.Accept()
+	limitedConn := conn.(*limitedConn)
+	if bpsPerConnLimit != limitedConn.BandwithLimit() {
+		t.Errorf("Listener.SetLimits did not set conn bps limit")
+	}
 }
 
-type MockListener struct {
-	addr net.Addr
+func TestListener_SetLimits_PostAccept(t *testing.T) {
+	listener := NewListener(&MockListener{})
+
+	conn, _ := listener.Accept()
+	limitedConn := conn.(*limitedConn)
+
+	bpsPerListenerLimit := 100 * KiB
+	bpsPerConnLimit := 2 * KiB
+	listener.SetBandwithLimits(bpsPerListenerLimit, bpsPerConnLimit)
+
+	if bpsPerConnLimit != limitedConn.BandwithLimit() {
+		t.Errorf("Listener.SetLimits did not set conn bps limit")
+	}
 }
 
-func (l *MockListener) Accept() (net.Conn, error) {
-	return nil, nil
+func TestConn_Read(t *testing.T) {
+	type given struct {
+		payload string
+		bps     ByteSize
+	}
+	type expect struct {
+		fullRead bool
+		err      error
+	}
+	tests := []struct {
+		given  given
+		expect expect
+	}{
+		{
+			given{payload: "", bps: 0 * KiB},
+			expect{fullRead: true, err: ErrNoBurstAvilable},
+		}, {
+			given{payload: "", bps: 1 * KiB},
+			expect{fullRead: true, err: nil},
+		}, {
+			given{payload: "01234567890", bps: 0 * KiB},
+			expect{fullRead: false, err: ErrNoBurstAvilable},
+		}, {
+			given{payload: "01234567890", bps: 1 * KiB},
+			expect{fullRead: true, err: nil},
+		}, {
+			given{payload: "01234567890", bps: 1 * B},
+			expect{fullRead: false, err: nil},
+		},
+	}
+
+	for _, tt := range tests {
+		name := fmt.Sprintf("payload:<%s>_bps:%v", tt.given.payload, tt.given.bps)
+		t.Run(name, func(t *testing.T) {
+			sourceConn := MockConn{B: *bytes.NewBuffer([]byte(tt.given.payload))}
+			expectN := sourceConn.B.Len()
+
+			conn := NewConn(&sourceConn, tt.given.bps)
+
+			readBuff := make([]byte, expectN)
+			n, err := conn.Read(readBuff)
+			fullRead := (n == expectN)
+
+			if !errors.Is(err, tt.expect.err) {
+				t.Errorf("Conn.Read() error = %v, want err %v", err, tt.expect.err)
+			}
+			if tt.expect.fullRead && !fullRead {
+				t.Errorf("Conn.Read() = %v, want %v", n, expectN)
+			}
+			if !tt.expect.fullRead && fullRead {
+				t.Errorf("Conn.Read() = %v, did not expect full read", n)
+			}
+		})
+	}
 }
 
-func (l *MockListener) Close() error {
-	return nil
+func TestConn_Read_OnBpsChange(t *testing.T) {
+	type given struct {
+		payload       string
+		bpsChangeFrom ByteSize
+		bpsChangeTo   ByteSize
+	}
+	type expect struct {
+		fullRead bool
+		err1     error
+		err2     error
+	}
+	tests := []struct {
+		given  given
+		expect expect
+	}{
+		{
+			given{payload: "", bpsChangeFrom: 0 * KiB, bpsChangeTo: 1 * KiB},
+			expect{fullRead: true, err1: ErrNoBurstAvilable, err2: nil},
+		}, {
+			given{payload: "", bpsChangeFrom: 1 * KiB, bpsChangeTo: 0 * KiB},
+			expect{fullRead: true, err1: nil, err2: ErrNoBurstAvilable},
+		}, {
+			given{payload: "01234567890", bpsChangeFrom: 0 * KiB, bpsChangeTo: 1 * KiB},
+			expect{fullRead: true, err1: ErrNoBurstAvilable, err2: nil},
+		}, {
+			given{payload: "01234567890", bpsChangeFrom: 1 * KiB, bpsChangeTo: 0 * KiB},
+			expect{fullRead: true, err1: nil, err2: ErrNoBurstAvilable},
+		}, {
+			given{payload: "01234567890", bpsChangeFrom: 1 * KiB, bpsChangeTo: 2 * KiB},
+			expect{fullRead: true, err1: nil, err2: io.EOF},
+		},
+	}
+
+	for _, tt := range tests {
+		name := fmt.Sprintf("payload:<%s>_bpsFrom:%v_bpsTo:%v",
+			tt.given.payload, tt.given.bpsChangeFrom, tt.given.bpsChangeTo)
+
+		t.Run(name, func(t *testing.T) {
+			sourceConn := MockConn{B: *bytes.NewBuffer([]byte(tt.given.payload))}
+			expectN := sourceConn.B.Len()
+			conn := NewConn(&sourceConn, tt.given.bpsChangeFrom)
+
+			readBuff := make([]byte, expectN)
+			n, err := conn.Read(readBuff)
+			allReadsSize := n
+
+			if !errors.Is(err, tt.expect.err1) {
+				t.Errorf("Conn.Read() error = %v, want err %v", err, tt.expect.err1)
+			}
+
+			conn.SetBandwithLimit(tt.given.bpsChangeTo)
+
+			n, err = conn.Read(readBuff)
+			allReadsSize += n
+			fullRead := (allReadsSize == expectN)
+
+			if !errors.Is(err, tt.expect.err2) {
+				t.Errorf("Conn.Read() error = %v, want err %v", err, tt.expect.err2)
+			}
+			if tt.expect.fullRead && !fullRead {
+				t.Errorf("Conn.Read() = %v, want %v", n, expectN)
+			}
+			if !tt.expect.fullRead && fullRead {
+				t.Errorf("Conn.Read() = %v, did not expect full read", n)
+			}
+		})
+	}
 }
 
-func (l *MockListener) Addr() net.Addr {
-	return l.addr
+type MockListener struct{}
+
+func (l *MockListener) Accept() (net.Conn, error) { return &MockConn{}, nil }
+func (l *MockListener) Close() error              { return nil }
+func (l *MockListener) Addr() net.Addr            { return nil }
+
+type MockConn struct {
+	B bytes.Buffer
+}
+
+func (mc *MockConn) Read(b []byte) (n int, err error) {
+	return mc.B.Read(b)
+}
+func (mc *MockConn) Write(b []byte) (n int, err error)  { return }
+func (mc *MockConn) Close() error                       { return nil }
+func (mc *MockConn) LocalAddr() net.Addr                { return nil }
+func (mc *MockConn) RemoteAddr() net.Addr               { return nil }
+func (mc *MockConn) SetDeadline(t time.Time) error      { return nil }
+func (mc *MockConn) SetReadDeadline(t time.Time) error  { return nil }
+func (ms *MockConn) SetWriteDeadline(t time.Time) error { return nil }
+
+func assertEqual(tb testing.TB, x, y interface{}, fmt string, args ...interface{}) {
+	if !reflect.DeepEqual(x, y) {
+		tb.Errorf(fmt, args...)
+	}
 }
