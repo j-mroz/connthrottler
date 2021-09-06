@@ -2,13 +2,14 @@ package iorate
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 type ByteSize uint
@@ -50,9 +51,8 @@ func TestBytesUnit_String(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.b.String(); got != tt.want {
-				t.Errorf("BytesUnit.String() = %v, want %v", got, tt.want)
-			}
+			assert.Equalf(t, tt.want, tt.b.String(),
+				"BytesUnit.String() returned wrong value")
 		})
 	}
 }
@@ -68,11 +68,8 @@ func TestReader_Read_WrappedReaders(t *testing.T) {
 	buff := make([]byte, 32*1024)
 	read, err := reader3.Read(buff)
 
-	assertEqual(t, read, expectRead,
-		"Reader.Read() = %v, want %v", read, expectRead)
-	if err != nil {
-		t.Errorf("Reader.Read() error = %v", err)
-	}
+	assert.Equalf(t, expectRead, read, "Reader.Read() wrong read size")
+	assert.NoError(t, err)
 }
 
 func TestWriter_Write(t *testing.T) {
@@ -104,7 +101,7 @@ func TestWriter_Write(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		testName := fmt.Sprintf("payload:<%s>_limit:%s",
+		testName := fmt.Sprintf("payload:%s_limit:%s",
 			tt.given.payload, tt.given.bps)
 
 		t.Run(testName, func(t *testing.T) {
@@ -115,13 +112,8 @@ func TestWriter_Write(t *testing.T) {
 			n, err := limitedWriter.Write([]byte(payload))
 			expectN := len(payload)
 
-			if n != expectN {
-				t.Errorf("Writer.Write() = %v, want %v", n, expectN)
-			}
-			if !errors.Is(err, tt.expect.err) {
-				t.Errorf("Writer.Write() error = %v, want err %v",
-					err, tt.expect.err)
-			}
+			assert.Equalf(t, expectN, n, "Writer.Writer() wrong write size")
+			assert.ErrorIs(t, err, tt.expect.err)
 		})
 	}
 }
@@ -154,7 +146,8 @@ func Benchmark_Reader(b *testing.B) {
 		if bm.chain != 0 {
 			chainedLimit = bm.chain.String()
 		}
-		testName := fmt.Sprintf("payload:%10s_limits:[%10s,%10s]", bm.payloadSize, bm.bps, chainedLimit)
+		testName := fmt.Sprintf("payload:%s_limits:%s,%s",
+			bm.payloadSize, bm.bps, chainedLimit)
 
 		writeSink.Grow(int(bm.payloadSize))
 		payload := make([]byte, bm.payloadSize)
@@ -186,7 +179,8 @@ func Benchmark_Writer(b *testing.B) {
 		if bm.chain != 0 {
 			chainedLimit = bm.chain.String()
 		}
-		testName := fmt.Sprintf("payload:%10s_limits:[%10s,%10s]", bm.payloadSize, bm.bps, chainedLimit)
+		testName := fmt.Sprintf("payload:%s_limits:%s,%s",
+			bm.payloadSize, bm.bps, chainedLimit)
 
 		payload := make([]byte, bm.payloadSize)
 
@@ -226,9 +220,7 @@ func TestListener_Accept(t *testing.T) {
 	conn, _ := limiter.Accept()
 
 	_, connStored := limiter.connections.Load(conn)
-	if !connStored {
-		t.Errorf("ListenerLimiter.Accept() should store accepted connections")
-	}
+	assert.Truef(t, connStored, "ListenerLimiter.Accept() should store accepted connections")
 }
 
 func TestListener_ConnClose(t *testing.T) {
@@ -236,9 +228,7 @@ func TestListener_ConnClose(t *testing.T) {
 	conn, _ := listener.Accept()
 	conn.Close()
 	_, connStored := listener.connections.Load(conn)
-	if connStored {
-		t.Errorf("connection on close should remove itself from a listener")
-	}
+	assert.Falsef(t, connStored, "connection on close should remove itself from a listener")
 }
 
 func TestListener_SetLimits_BeforeAccept(t *testing.T) {
@@ -249,16 +239,14 @@ func TestListener_SetLimits_BeforeAccept(t *testing.T) {
 	listener.SetLimits(bpsPerListenerLimit, bpsPerConnLimit)
 
 	gotPerListenerLimit, gotPerConnLimit := listener.Limits()
-	if bpsPerListenerLimit != gotPerListenerLimit ||
-		bpsPerConnLimit != gotPerConnLimit {
-		t.Errorf("Listener.SetLimits limits sets incorrectly")
-	}
+
+	assert.Equalf(t, bpsPerListenerLimit, gotPerListenerLimit, "bpsPerListener")
+	assert.Equalf(t, bpsPerConnLimit, gotPerConnLimit, "bpsPerConn")
 
 	conn, _ := listener.Accept()
 	limitedConn := conn.(*limitedConn)
-	if bpsPerConnLimit != limitedConn.Limit() {
-		t.Errorf("Listener.SetLimits did not set conn bps limit")
-	}
+	assert.Equalf(t, bpsPerConnLimit, limitedConn.Limit(),
+		"Listener.SetLimits did not set conn bps limit")
 }
 
 func TestListener_SetLimits_PostAccept(t *testing.T) {
@@ -271,9 +259,9 @@ func TestListener_SetLimits_PostAccept(t *testing.T) {
 	bpsPerConnLimit := 2 * KBps
 	listener.SetLimits(bpsPerListenerLimit, bpsPerConnLimit)
 
-	if bpsPerConnLimit != limitedConn.Limit() {
-		t.Errorf("Listener.SetLimits did not set conn bps limit")
-	}
+	assert.Equalf(t, bpsPerConnLimit, limitedConn.Limit(),
+		"Listener.SetLimits did not set conn bps limit")
+
 }
 
 func TestConn_Read(t *testing.T) {
@@ -319,9 +307,7 @@ func TestConn_Read(t *testing.T) {
 			n, err := conn.Read(readBuff)
 			fullRead := (n == expectN)
 
-			if !errors.Is(err, tt.expect.err) {
-				t.Errorf("Conn.Read() error = %v, want err %v", err, tt.expect.err)
-			}
+			assert.ErrorIs(t, err, tt.expect.err, "Conn.Read() error")
 			if tt.expect.fullRead && !fullRead {
 				t.Errorf("Conn.Read() = %v, want %v", n, expectN)
 			}
@@ -378,9 +364,7 @@ func TestConn_Read_OnBpsChange(t *testing.T) {
 			n, err := conn.Read(readBuff)
 			allReadsSize := n
 
-			if !errors.Is(err, tt.expect.err1) {
-				t.Errorf("Conn.Read() error = %v, want err %v", err, tt.expect.err1)
-			}
+			assert.ErrorIs(t, err, tt.expect.err1, "Conn.Read() error")
 
 			conn.SetLimit(tt.given.bpsChangeTo)
 
@@ -388,9 +372,7 @@ func TestConn_Read_OnBpsChange(t *testing.T) {
 			allReadsSize += n
 			fullRead := (allReadsSize == expectN)
 
-			if !errors.Is(err, tt.expect.err2) {
-				t.Errorf("Conn.Read() error = %v, want err %v", err, tt.expect.err2)
-			}
+			assert.ErrorIs(t, err, tt.expect.err2, "Conn.Read() error")
 			if tt.expect.fullRead && !fullRead {
 				t.Errorf("Conn.Read() = %v, want %v", n, expectN)
 			}
