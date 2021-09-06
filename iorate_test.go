@@ -11,16 +11,42 @@ import (
 	"time"
 )
 
+type ByteSize uint
+
+const (
+	B  ByteSize = 1
+	KB ByteSize = 1 << (10 * iota)
+	MB
+	GB
+	TB
+	PB
+	EB
+)
+
+var byteUnits = []ByteSize{B, KB, MB, GB, TB, PB}
+var byteNames = []string{"B", "K", "MB", "GB", "TB", "PB"}
+
+func (b ByteSize) String() string {
+	var pos int
+	for i, unit := range byteUnits {
+		if b/unit == 0 {
+			break
+		}
+		pos = i
+	}
+	return fmt.Sprintf("%0.2f%s", float64(b)/float64(byteUnits[pos]), byteNames[pos])
+}
+
 func TestBytesUnit_String(t *testing.T) {
 	tests := []struct {
 		name string
-		b    ByteSize
+		b    Bandwidth
 		want string
 	}{
-		{"1B", 1 * B, "1.00B"},
-		{"1KiB", 1 * KiB, "1.00KiB"},
-		{"1GiB", 1 * MiB, "1.00MiB"},
-		{"1GiB", 1 * GiB, "1.00GiB"},
+		{"1Bps", 1 * Bps, "1.00Bps"},
+		{"1KBps", 1 * KBps, "1.00KBps"},
+		{"1GBps", 1 * MBps, "1.00MBps"},
+		{"1GBps", 1 * GBps, "1.00GBps"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -33,7 +59,7 @@ func TestBytesUnit_String(t *testing.T) {
 
 func TestReader_Read_SharedLimit(t *testing.T) {
 	payload := []byte("0123456789")
-	bps := 2 * B
+	bps := 2 * Bps
 	expectReadSize := 2
 	limiter := NewBandwidthLimiter(bps)
 	limitedReader := NewReaderWithSharedLimit(bytes.NewReader(payload), limiter)
@@ -53,9 +79,9 @@ func TestReader_Read_ChainedReaders(t *testing.T) {
 	payload := []byte("0123456789")
 	expectRead := 3
 
-	reader1 := NewReader(bytes.NewReader(payload), 5*B)
-	reader2 := NewReader(reader1, 3*B)
-	reader3 := NewReader(reader2, 10*B)
+	reader1 := NewReader(bytes.NewReader(payload), 5*Bps)
+	reader2 := NewReader(reader1, 3*Bps)
+	reader3 := NewReader(reader2, 10*Bps)
 
 	buff := make([]byte, 32*1024)
 	read, err := reader3.Read(buff)
@@ -70,7 +96,7 @@ func TestReader_Read_ChainedReaders(t *testing.T) {
 func TestWriter_Write(t *testing.T) {
 	type given struct {
 		payload string
-		bps     ByteSize
+		bps     Bandwidth
 	}
 	type expect struct {
 		fullWrite bool
@@ -81,16 +107,16 @@ func TestWriter_Write(t *testing.T) {
 		expect expect
 	}{
 		{
-			given{payload: "", bps: 0 * KiB},
+			given{payload: "", bps: 0 * KBps},
 			expect{fullWrite: false, err: ErrNoBurstAvilable},
 		}, {
-			given{payload: "", bps: 1 * KiB},
+			given{payload: "", bps: 1 * KBps},
 			expect{fullWrite: true, err: nil},
 		}, {
-			given{payload: "01234567890", bps: 1 * B},
+			given{payload: "01234567890", bps: 5 * Bps},
 			expect{fullWrite: false, err: nil},
 		}, {
-			given{payload: "01234567890", bps: 1 * KiB},
+			given{payload: "01234567890", bps: 1 * KBps},
 			expect{fullWrite: true, err: nil},
 		},
 	}
@@ -118,23 +144,23 @@ func TestWriter_Write(t *testing.T) {
 }
 
 type readWriteTestBenchConfig struct {
-	bps         ByteSize
+	bps         Bandwidth
+	chain       Bandwidth // enabled if not 0
 	payloadSize ByteSize
-	chain       ByteSize // enabled if not 0
 	wantErr     bool
 	r           io.Reader
 	w           io.Writer
 }
 
 // var readerWriterTests = []readWriteTestBenchConfig{
-// 	{bps: 1 * KiB, payloadSize: 4 * KiB, wantErr: false},
-// 	{bps: 1 * KiB, chain: 1 * KiB, payloadSize: 4 * KiB, wantErr: false},
-// 	{bps: 1 * KiB, chain: 800 * B, payloadSize: 4 * KiB, wantErr: false},
-// 	{bps: 2 * KiB, payloadSize: 4 * KiB, wantErr: false},
-// 	{bps: 250 * KiB, payloadSize: 1 * MiB, wantErr: false},
-// 	{bps: 250 * KiB, chain: 200 * KiB, payloadSize: 1 * MiB, wantErr: false},
+// 	{bps: 1 * KBps, payloadSize: 4 * KBps, wantErr: false},
+// 	{bps: 1 * KBps, chain: 1 * KBps, payloadSize: 4 * KBps, wantErr: false},
+// 	{bps: 1 * KBps, chain: 800 *Bps, payloadSize: 4 * KBps, wantErr: false},
+// 	{bps: 2 * KBps, payloadSize: 4 * KBps, wantErr: false},
+// 	{bps: 250 * KBps, payloadSize: 1 * MBps, wantErr: false},
+// 	{bps: 250 * KBps, chain: 200 * KBps, payloadSize: 1 * MBps, wantErr: false},
 
-// 	{bps: 1 * MiB, payloadSize: 4 * MiB, wantErr: false},
+// 	{bps: 1 * MBps, payloadSize: 4 * MBps, wantErr: false},
 // }
 
 // func TestWriter_Write_InIoCopy(t *testing.T) {
@@ -206,13 +232,13 @@ type readWriteTestBenchConfig struct {
 
 // Benchamarks for determining optimal optimal bps and burst ratio
 var readWriteBenchmarks = []readWriteTestBenchConfig{
-	{bps: 128 * B, payloadSize: 200 * B},
-	{bps: 1 * KiB, payloadSize: 4 * KiB},
-	{bps: 1 * KiB, chain: 800 * B, payloadSize: 4 * KiB, wantErr: false},
-	{bps: 250 * KiB, chain: 200 * KiB, payloadSize: 4 * MiB},
-	{bps: 250 * KiB, payloadSize: 4 * MiB},
-	{bps: 1 * MiB, payloadSize: 4 * MiB},
-	// {bps: 250 * MiB, payloadSize: 1 * GiB},
+	{bps: 128 * Bps, payloadSize: 200 * B},
+	{bps: 1 * KBps, payloadSize: 4 * KB},
+	{bps: 1 * KBps, chain: 800 * Bps, payloadSize: 4 * KB, wantErr: false},
+	{bps: 250 * KBps, chain: 200 * KBps, payloadSize: 4 * MB},
+	{bps: 250 * KBps, payloadSize: 4 * MB},
+	{bps: 1 * MBps, payloadSize: 4 * MB},
+	// {bps: 250 * MBps, payloadSize: 1 * GBps},
 }
 
 func Benchmark_Reader(b *testing.B) {
@@ -311,8 +337,8 @@ func TestListener_ConnClose(t *testing.T) {
 }
 
 func TestListener_SetLimits_OnAccept(t *testing.T) {
-	bpsPerListenerLimit := 100 * KiB
-	bpsPerConnLimit := 2 * KiB
+	bpsPerListenerLimit := 100 * KBps
+	bpsPerConnLimit := 2 * KBps
 
 	listener := NewListener(&MockListener{}).(*limitedListener)
 	listener.SetBandwithLimits(bpsPerListenerLimit, bpsPerConnLimit)
@@ -336,8 +362,8 @@ func TestListener_SetLimits_PostAccept(t *testing.T) {
 	conn, _ := listener.Accept()
 	limitedConn := conn.(*limitedConn)
 
-	bpsPerListenerLimit := 100 * KiB
-	bpsPerConnLimit := 2 * KiB
+	bpsPerListenerLimit := 100 * KBps
+	bpsPerConnLimit := 2 * KBps
 	listener.SetBandwithLimits(bpsPerListenerLimit, bpsPerConnLimit)
 
 	if bpsPerConnLimit != limitedConn.BandwithLimit() {
@@ -348,7 +374,7 @@ func TestListener_SetLimits_PostAccept(t *testing.T) {
 func TestConn_Read(t *testing.T) {
 	type given struct {
 		payload string
-		bps     ByteSize
+		bps     Bandwidth
 	}
 	type expect struct {
 		fullRead bool
@@ -359,19 +385,19 @@ func TestConn_Read(t *testing.T) {
 		expect expect
 	}{
 		{
-			given{payload: "", bps: 0 * KiB},
+			given{payload: "", bps: 0 * KBps},
 			expect{fullRead: true, err: ErrNoBurstAvilable},
 		}, {
-			given{payload: "", bps: 1 * KiB},
+			given{payload: "", bps: 1 * KBps},
 			expect{fullRead: true, err: nil},
 		}, {
-			given{payload: "01234567890", bps: 0 * KiB},
+			given{payload: "01234567890", bps: 0 * KBps},
 			expect{fullRead: false, err: ErrNoBurstAvilable},
 		}, {
-			given{payload: "01234567890", bps: 1 * KiB},
+			given{payload: "01234567890", bps: 1 * KBps},
 			expect{fullRead: true, err: nil},
 		}, {
-			given{payload: "01234567890", bps: 1 * B},
+			given{payload: "01234567890", bps: 1 * Bps},
 			expect{fullRead: false, err: nil},
 		},
 	}
@@ -404,8 +430,8 @@ func TestConn_Read(t *testing.T) {
 func TestConn_Read_OnBpsChange(t *testing.T) {
 	type given struct {
 		payload       string
-		bpsChangeFrom ByteSize
-		bpsChangeTo   ByteSize
+		bpsChangeFrom Bandwidth
+		bpsChangeTo   Bandwidth
 	}
 	type expect struct {
 		fullRead bool
@@ -417,19 +443,19 @@ func TestConn_Read_OnBpsChange(t *testing.T) {
 		expect expect
 	}{
 		{
-			given{payload: "", bpsChangeFrom: 0 * KiB, bpsChangeTo: 1 * KiB},
+			given{payload: "", bpsChangeFrom: 0 * KBps, bpsChangeTo: 1 * KBps},
 			expect{fullRead: true, err1: ErrNoBurstAvilable, err2: nil},
 		}, {
-			given{payload: "", bpsChangeFrom: 1 * KiB, bpsChangeTo: 0 * KiB},
+			given{payload: "", bpsChangeFrom: 1 * KBps, bpsChangeTo: 0 * KBps},
 			expect{fullRead: true, err1: nil, err2: ErrNoBurstAvilable},
 		}, {
-			given{payload: "01234567890", bpsChangeFrom: 0 * KiB, bpsChangeTo: 1 * KiB},
+			given{payload: "01234567890", bpsChangeFrom: 0 * KBps, bpsChangeTo: 1 * KBps},
 			expect{fullRead: true, err1: ErrNoBurstAvilable, err2: nil},
 		}, {
-			given{payload: "01234567890", bpsChangeFrom: 1 * KiB, bpsChangeTo: 0 * KiB},
+			given{payload: "01234567890", bpsChangeFrom: 1 * KBps, bpsChangeTo: 0 * KBps},
 			expect{fullRead: true, err1: nil, err2: ErrNoBurstAvilable},
 		}, {
-			given{payload: "01234567890", bpsChangeFrom: 1 * KiB, bpsChangeTo: 2 * KiB},
+			given{payload: "01234567890", bpsChangeFrom: 1 * KBps, bpsChangeTo: 2 * KBps},
 			expect{fullRead: true, err1: nil, err2: io.EOF},
 		},
 	}
