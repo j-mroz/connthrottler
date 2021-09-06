@@ -57,31 +57,13 @@ func TestBytesUnit_String(t *testing.T) {
 	}
 }
 
-func TestReader_Read_SharedLimit(t *testing.T) {
-	payload := []byte("0123456789")
-	bps := 2 * Bps
-	expectReadSize := 2
-	limiter := NewBandwidthLimiter(bps)
-	limitedReader := NewReaderWithSharedLimit(bytes.NewReader(payload), limiter)
-
-	buff := make([]byte, 32*1024)
-	n, err := limitedReader.Read(buff)
-
-	if n != expectReadSize {
-		t.Errorf("Reader.Read() = %v, want %v", n, expectReadSize)
-	}
-	if err != nil {
-		t.Errorf("Reader.Read() error = %v", err)
-	}
-}
-
-func TestReader_Read_ChainedReaders(t *testing.T) {
+func TestReader_Read_WrappedReaders(t *testing.T) {
 	payload := []byte("0123456789")
 	expectRead := 3
 
-	reader1 := NewReader(bytes.NewReader(payload), 5*Bps)
-	reader2 := NewReader(reader1, 3*Bps)
-	reader3 := NewReader(reader2, 10*Bps)
+	reader1 := NewLimitedReader(bytes.NewReader(payload), 5*Bps)
+	reader2 := NewLimitedReader(reader1, 3*Bps)
+	reader3 := NewLimitedReader(reader2, 10*Bps)
 
 	buff := make([]byte, 32*1024)
 	read, err := reader3.Read(buff)
@@ -127,11 +109,12 @@ func TestWriter_Write(t *testing.T) {
 
 		t.Run(testName, func(t *testing.T) {
 			var writeSink bytes.Buffer
-			limitedWriter := NewWriter(&writeSink, tt.given.bps)
+			limitedWriter := NewLimitedWriter(&writeSink, tt.given.bps)
 
 			payload := []byte(tt.given.payload)
 			n, err := limitedWriter.Write([]byte(payload))
 			expectN := len(payload)
+
 			if n != expectN {
 				t.Errorf("Writer.Write() = %v, want %v", n, expectN)
 			}
@@ -143,7 +126,7 @@ func TestWriter_Write(t *testing.T) {
 	}
 }
 
-type readWriteTestBenchConfig struct {
+type readWriteBenchConfig struct {
 	bps         Bandwidth
 	chain       Bandwidth // enabled if not 0
 	payloadSize ByteSize
@@ -152,86 +135,8 @@ type readWriteTestBenchConfig struct {
 	w           io.Writer
 }
 
-// var readerWriterTests = []readWriteTestBenchConfig{
-// 	{bps: 1 * KBps, payloadSize: 4 * KBps, wantErr: false},
-// 	{bps: 1 * KBps, chain: 1 * KBps, payloadSize: 4 * KBps, wantErr: false},
-// 	{bps: 1 * KBps, chain: 800 *Bps, payloadSize: 4 * KBps, wantErr: false},
-// 	{bps: 2 * KBps, payloadSize: 4 * KBps, wantErr: false},
-// 	{bps: 250 * KBps, payloadSize: 1 * MBps, wantErr: false},
-// 	{bps: 250 * KBps, chain: 200 * KBps, payloadSize: 1 * MBps, wantErr: false},
-
-// 	{bps: 1 * MBps, payloadSize: 4 * MBps, wantErr: false},
-// }
-
-// func TestWriter_Write_InIoCopy(t *testing.T) {
-
-// 	for _, tt := range readerWriterTests {
-
-// 		testName := fmt.Sprintf("payload:%s_limit:%s", tt.payloadSize, tt.bps)
-
-// 		t.Run(testName, func(t *testing.T) {
-// 			// t.Parallel()
-
-// 			var writeSink bytes.Buffer
-// 			writeSink.Grow(int(tt.payloadSize))
-// 			payload := make([]byte, tt.payloadSize)
-// 			writeLimiter := NewWriter(&writeSink, tt.bps)
-// 			tt.w = writeLimiter
-// 			tt.r = bytes.NewReader(payload)
-// 			readWriteTest(t, &tt)
-// 		})
-// 	}
-// }
-
-// func TestReader_Read_InIoCopy(t *testing.T) {
-
-// 	for _, tt := range readerWriterTests {
-// 		testName := fmt.Sprintf("payload:%s_limit:%s", tt.payloadSize, tt.bps)
-// 		if tt.chain != 0 {
-// 			testName += "_chain:" + tt.chain.String()
-// 		}
-// 		t.Run(testName, func(t *testing.T) {
-// 			// t.Parallel()
-
-// 			var writeSink bytes.Buffer
-// 			writeSink.Grow(int(tt.payloadSize))
-// 			payload := make([]byte, tt.payloadSize)
-// 			readSource := bytes.NewReader(payload)
-
-// 			r := NewReader(readSource, tt.bps)
-// 			if tt.chain != 0 {
-// 				r = NewReader(r, tt.chain)
-// 			}
-// 			tt.r = r
-// 			tt.w = &writeSink
-// 			readWriteTest(t, &tt)
-// 		})
-// 	}
-// }
-
-// func readWriteTest(t *testing.T, args *readWriteTestBenchConfig) {
-// 	copyStartTime := time.Now()
-// 	written, err := io.Copy(args.w, args.r)
-// 	copyTime := time.Since(copyStartTime)
-
-// 	if (err != nil) != args.wantErr {
-// 		t.Errorf("io.Copy error = %v, wantErr %v", err, args.wantErr)
-// 		return
-// 	}
-// 	if written != int64(args.payloadSize) {
-// 		t.Errorf("io.Copy write = %v, want %v", written, args.payloadSize)
-// 	}
-
-// 	throughput := float64(written) / copyTime.Seconds()
-// 	minBps := float64(args.bps) * 0.95
-// 	maxBps := float64(args.bps) * 1.05
-// 	if !(minBps <= throughput) || !(throughput <= maxBps) {
-// 		t.Errorf("throughput = %f, accepted range [%f, %f]", throughput, minBps, maxBps)
-// 	}
-// }
-
 // Benchamarks for determining optimal optimal bps and burst ratio
-var readWriteBenchmarks = []readWriteTestBenchConfig{
+var readWriteBenchmarks = []readWriteBenchConfig{
 	{bps: 128 * Bps, payloadSize: 200 * B},
 	{bps: 1 * KBps, payloadSize: 4 * KB},
 	{bps: 1 * KBps, chain: 800 * Bps, payloadSize: 4 * KB, wantErr: false},
@@ -261,11 +166,11 @@ func Benchmark_Reader(b *testing.B) {
 
 			for runN := 0; runN < b.N; runN++ {
 				writeSink.Reset()
-				readLimiter := NewReader(bytes.NewReader(payload), bm.bps)
+				limitedReader := NewLimitedReader(bytes.NewReader(payload), bm.bps)
 				if bm.chain != 0 {
-					readLimiter = NewReader(readLimiter, bm.chain)
+					limitedReader = NewLimitedReader(limitedReader, bm.chain)
 				}
-				avgTroughput += readWriteBenchmark(b, readLimiter, &writeSink)
+				avgTroughput += readWriteBenchmark(b, limitedReader, &writeSink)
 			}
 
 			avgTroughput /= float64(b.N)
@@ -275,7 +180,6 @@ func Benchmark_Reader(b *testing.B) {
 }
 
 func Benchmark_Writer(b *testing.B) {
-	var writeSink bytes.Buffer
 
 	for _, bm := range readWriteBenchmarks {
 		chainedLimit := ""
@@ -284,23 +188,24 @@ func Benchmark_Writer(b *testing.B) {
 		}
 		testName := fmt.Sprintf("payload:%10s_limits:[%10s,%10s]", bm.payloadSize, bm.bps, chainedLimit)
 
-		writeSink.Grow(int(bm.payloadSize))
 		payload := make([]byte, bm.payloadSize)
 
 		b.Run(testName, func(b *testing.B) {
-			b.ReportAllocs()
+			var writeSink bytes.Buffer
+			writeSink.Grow(int(bm.payloadSize))
 
 			var avgTroughput float64
 
+			b.ReportAllocs()
 			for runN := 0; runN < b.N; runN++ {
 				writeSink.Reset()
 				payloadReader := bytes.NewReader(payload)
-				writeLimiter := NewWriter(&writeSink, bm.bps)
+				limitedWriter := NewLimitedWriter(&writeSink, bm.bps)
 				if bm.chain != 0 {
-					writeLimiter = NewWriter(&writeSink, bm.bps)
-					writeLimiter = NewWriter(writeLimiter, bm.chain)
+					limitedWriter = NewLimitedWriter(&writeSink, bm.bps)
+					limitedWriter = NewLimitedWriter(limitedWriter, bm.chain)
 				}
-				avgTroughput += readWriteBenchmark(b, payloadReader, writeLimiter)
+				avgTroughput += readWriteBenchmark(b, payloadReader, limitedWriter)
 			}
 
 			avgTroughput /= float64(b.N)
@@ -317,7 +222,7 @@ func readWriteBenchmark(b *testing.B, r io.Reader, w io.Writer) (throughput floa
 }
 
 func TestListener_Accept(t *testing.T) {
-	limiter := NewListener(&MockListener{}).(*limitedListener)
+	limiter := NewLimitedListener(&MockListener{}).(*limitedListener)
 	conn, _ := limiter.Accept()
 
 	_, connStored := limiter.connections.Load(conn)
@@ -327,7 +232,7 @@ func TestListener_Accept(t *testing.T) {
 }
 
 func TestListener_ConnClose(t *testing.T) {
-	listener := NewListener(&MockListener{}).(*limitedListener)
+	listener := NewLimitedListener(&MockListener{}).(*limitedListener)
 	conn, _ := listener.Accept()
 	conn.Close()
 	_, connStored := listener.connections.Load(conn)
@@ -336,14 +241,14 @@ func TestListener_ConnClose(t *testing.T) {
 	}
 }
 
-func TestListener_SetLimits_OnAccept(t *testing.T) {
+func TestListener_SetLimits_BeforeAccept(t *testing.T) {
 	bpsPerListenerLimit := 100 * KBps
 	bpsPerConnLimit := 2 * KBps
 
-	listener := NewListener(&MockListener{}).(*limitedListener)
-	listener.SetBandwithLimits(bpsPerListenerLimit, bpsPerConnLimit)
+	listener := NewLimitedListener(&MockListener{}).(*limitedListener)
+	listener.SetLimits(bpsPerListenerLimit, bpsPerConnLimit)
 
-	gotPerListenerLimit, gotPerConnLimit := listener.BandwithLimits()
+	gotPerListenerLimit, gotPerConnLimit := listener.Limits()
 	if bpsPerListenerLimit != gotPerListenerLimit ||
 		bpsPerConnLimit != gotPerConnLimit {
 		t.Errorf("Listener.SetLimits limits sets incorrectly")
@@ -351,22 +256,22 @@ func TestListener_SetLimits_OnAccept(t *testing.T) {
 
 	conn, _ := listener.Accept()
 	limitedConn := conn.(*limitedConn)
-	if bpsPerConnLimit != limitedConn.BandwithLimit() {
+	if bpsPerConnLimit != limitedConn.Limit() {
 		t.Errorf("Listener.SetLimits did not set conn bps limit")
 	}
 }
 
 func TestListener_SetLimits_PostAccept(t *testing.T) {
-	listener := NewListener(&MockListener{})
+	listener := NewLimitedListener(&MockListener{})
 
 	conn, _ := listener.Accept()
 	limitedConn := conn.(*limitedConn)
 
 	bpsPerListenerLimit := 100 * KBps
 	bpsPerConnLimit := 2 * KBps
-	listener.SetBandwithLimits(bpsPerListenerLimit, bpsPerConnLimit)
+	listener.SetLimits(bpsPerListenerLimit, bpsPerConnLimit)
 
-	if bpsPerConnLimit != limitedConn.BandwithLimit() {
+	if bpsPerConnLimit != limitedConn.Limit() {
 		t.Errorf("Listener.SetLimits did not set conn bps limit")
 	}
 }
@@ -408,7 +313,7 @@ func TestConn_Read(t *testing.T) {
 			sourceConn := MockConn{B: *bytes.NewBuffer([]byte(tt.given.payload))}
 			expectN := sourceConn.B.Len()
 
-			conn := NewConn(&sourceConn, tt.given.bps)
+			conn := NewLimitedConn(&sourceConn, tt.given.bps)
 
 			readBuff := make([]byte, expectN)
 			n, err := conn.Read(readBuff)
@@ -467,7 +372,7 @@ func TestConn_Read_OnBpsChange(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			sourceConn := MockConn{B: *bytes.NewBuffer([]byte(tt.given.payload))}
 			expectN := sourceConn.B.Len()
-			conn := NewConn(&sourceConn, tt.given.bpsChangeFrom)
+			conn := NewLimitedConn(&sourceConn, tt.given.bpsChangeFrom)
 
 			readBuff := make([]byte, expectN)
 			n, err := conn.Read(readBuff)
@@ -477,7 +382,7 @@ func TestConn_Read_OnBpsChange(t *testing.T) {
 				t.Errorf("Conn.Read() error = %v, want err %v", err, tt.expect.err1)
 			}
 
-			conn.SetBandwithLimit(tt.given.bpsChangeTo)
+			conn.SetLimit(tt.given.bpsChangeTo)
 
 			n, err = conn.Read(readBuff)
 			allReadsSize += n
@@ -518,6 +423,7 @@ func (mc *MockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (ms *MockConn) SetWriteDeadline(t time.Time) error { return nil }
 
 func assertEqual(tb testing.TB, x, y interface{}, fmt string, args ...interface{}) {
+	tb.Helper()
 	if !reflect.DeepEqual(x, y) {
 		tb.Errorf(fmt, args...)
 	}

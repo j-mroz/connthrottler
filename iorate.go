@@ -27,6 +27,7 @@ const (
 var bpsUnits = []Bandwidth{Bps, KBps, MBps, GBps, TBps, PBps}
 var bpsUnitNames = []string{"Bps", "KBps", "MBps", "GBps", "TBps", "PBps"}
 
+// String formats bandwidth value in human readable format.
 func (b Bandwidth) String() string {
 	var pos int
 	for i, unit := range bpsUnits {
@@ -38,90 +39,109 @@ func (b Bandwidth) String() string {
 	return fmt.Sprintf("%0.2f%s", b/bpsUnits[pos], bpsUnitNames[pos])
 }
 
-// Reader controlls how often reads are allowed to happen.
-type Reader struct {
-	*BandwidthLimiter
-	src io.Reader
+// LimitedReader controlls how often reads are allowed to happen.
+type LimitedReader interface {
+	io.Reader
+
+	// SetReadLimit sets the bandwidth limtis for future read.
+	SetReadLimit(bps Bandwidth)
+
+	// ReadLimit returns the read i/o bandwidth limit.
+	ReadLimit() Bandwidth
 }
 
-// NewReadLimiter creates new ReadLimiter.
-func NewReader(r io.Reader, bps Bandwidth) *Reader {
-	return &Reader{src: r, BandwidthLimiter: NewBandwidthLimiter(bps)}
+// LimitedWriter controlls how often writes are allowed to happen.
+type LimitedWriter interface {
+	io.Writer
+
+	// SetWriteLimit sets the bandwidth limit for future write i/o ops.
+	SetWriteLimit(bps Bandwidth)
+
+	// WriteLimit returns the write i/o bandwidth limit.
+	WriteLimit() Bandwidth
 }
 
-// NewReadLimiter creates new ReadLimiter.
-func NewReaderWithSharedLimit(r io.Reader, limiter *BandwidthLimiter) *Reader {
-	return &Reader{src: r, BandwidthLimiter: limiter}
+type limitedReader struct {
+	limiter *limiter
+	src     io.Reader
+}
+
+// NewLimitedReader creates new LimitedReader.
+func NewLimitedReader(r io.Reader, bps Bandwidth) LimitedReader {
+	return &limitedReader{src: r, limiter: newLimiter(bps)}
 }
 
 // Read calls wrapped io.Reader, but limits the throughput.
-func (r *Reader) Read(b []byte) (n int, err error) {
-	allowed, err := r.waitBandwidth(len(b))
+func (r *limitedReader) Read(b []byte) (n int, err error) {
+	allowed, err := r.limiter.waitBandwidth(len(b))
 	if err != nil {
 		return 0, err
 	}
 	return r.src.Read(b[:allowed])
 }
 
+func (r *limitedReader) SetReadLimit(bps Bandwidth) { r.limiter.SetLimit(bps) }
+func (r *limitedReader) ReadLimit() Bandwidth       { return r.limiter.Limit() }
+
 // Writer controlls how often writes are allowed to happen.
-type Writer struct {
-	*BandwidthLimiter
-	writer io.Writer
+type limitedWriter struct {
+	limiter *limiter
+	dst     io.Writer
 }
 
-// NewWriter creates new Writer and sets
-func NewWriter(w io.Writer, bps Bandwidth) *Writer {
-	return &Writer{writer: w, BandwidthLimiter: NewBandwidthLimiter(bps)}
-}
+// NewLimitedWriter creates new Writer and sets
+func NewLimitedWriter(w io.Writer, bps Bandwidth) LimitedWriter {
+	return &limitedWriter{dst: w, limiter: newLimiter(bps)}
 
-// NewWriter creates new Writer and sets
-func NewWriterWithSharedLimit(w io.Writer, limiter *BandwidthLimiter) *Writer {
-	return &Writer{writer: w, BandwidthLimiter: limiter}
 }
 
 // Write calls wrapped io.Writer, but limits the throughput.
-func (wl *Writer) Write(b []byte) (n int, err error) {
-	reader := Reader{
-		src:              bytes.NewReader(b),
-		BandwidthLimiter: wl.BandwidthLimiter,
+func (w *limitedWriter) Write(b []byte) (n int, err error) {
+	reader := limitedReader{
+		src:     bytes.NewReader(b),
+		limiter: w.limiter,
 	}
-	written, err := io.Copy(wl.writer, &reader)
+	written, err := io.Copy(w.dst, &reader)
 	return int(written), err
 }
 
-func (wl *Writer) ReadFrom(r io.Reader) (n int64, err error) {
-	reader := Reader{
-		src:              r,
-		BandwidthLimiter: wl.BandwidthLimiter,
-	}
-	return io.Copy(wl.writer, &reader)
+// ReadFrom writes directly from a source reader into wrapped  io.Writer,
+// but limits the throughput.
+//
+// Enables the io.Copy to skip the temporary buffer.
+func (w *limitedWriter) ReadFrom(r io.Reader) (n int64, err error) {
+	reader := limitedReader{src: r, limiter: w.limiter}
+	return io.Copy(w.dst, &reader)
 }
 
-type Listener interface {
+func (w *limitedWriter) SetWriteLimit(bps Bandwidth) { w.limiter.SetLimit(bps) }
+func (w *limitedWriter) WriteLimit() Bandwidth       { return w.limiter.Limit() }
+
+// LimitedListener controlls how often read and writes bandwitch for
+// connections spawned by a listener.
+type LimitedListener interface {
 	// Listener implements net.Listener interface.
 	net.Listener
 
-	// SetBandwithLimits sets the per listener and per connection
-	// bandwith limits
-	SetBandwithLimits(bpsPerListener, bpsPerConn Bandwidth)
+	// SetLimits sets the per listener and per connection bandwith limits
+	SetLimits(listenerLimit, connLimit Bandwidth)
 
-	// BandwithLimits return the per listener and per connection
-	// bandwith limits.
-	BandwithLimits() (listenerLimit, connLimit Bandwidth)
+	// Limits return the per listener and per connection  bandwith limits.
+	Limits() (listenerLimit, connLimit Bandwidth)
 }
 
-// Listener controlls how often read and writes bandwitch for
+// limitedListener controlls how often read and writes bandwitch for
 // connections spawned by a listener.
 type limitedListener struct {
 	net.Listener
-	connections     sync.Map
-	limitsMu        sync.RWMutex
-	readLimiter     BandwidthLimiter
-	writeLimiter    BandwidthLimiter
-	bpsPerConnLimit Bandwidth
+	connections  sync.Map
+	limitsMu     sync.RWMutex
+	readLimiter  limiter
+	writeLimiter limiter
+	connLimit    Bandwidth
 }
 
-func NewListener(l net.Listener) Listener {
+func NewLimitedListener(l net.Listener) LimitedListener {
 	return &limitedListener{Listener: l}
 }
 
@@ -131,8 +151,8 @@ func (l *limitedListener) Accept() (net.Conn, error) {
 	nc, err := l.Listener.Accept()
 	if err == nil {
 		l.limitsMu.RLock()
-		limitedConn = newConnWithListener(nc, l)
-		limitedConn.SetBandwithLimit(l.bpsPerConnLimit)
+		limitedConn = newLimitedListenerConn(nc, l)
+		limitedConn.SetLimit(l.connLimit)
 		l.connections.Store(limitedConn, 1)
 		l.limitsMu.RUnlock()
 	}
@@ -143,25 +163,25 @@ func (l *limitedListener) onConnClose(conn Conn) {
 	l.connections.Delete(conn)
 }
 
-// SetBandwithLimits sets the per listener and per connection bandwith limits.
-func (l *limitedListener) SetBandwithLimits(bpsPerListener, bpsPerConn Bandwidth) {
+// SetLimits sets the per listener and per connection bandwith limits.
+func (l *limitedListener) SetLimits(listenerLimit, connLimit Bandwidth) {
 	l.limitsMu.Lock()
 	defer l.limitsMu.Unlock()
-	l.readLimiter.SetBandwithLimit(bpsPerListener)
-	l.writeLimiter.SetBandwithLimit(bpsPerListener)
-	l.bpsPerConnLimit = bpsPerConn
+	l.readLimiter.SetLimit(listenerLimit)
+	l.writeLimiter.SetLimit(listenerLimit)
+	l.connLimit = connLimit
 	l.connections.Range(func(key, value interface{}) bool {
 		conn := key.(Conn)
-		conn.SetBandwithLimit(bpsPerConn)
-		return false
+		conn.SetLimit(connLimit)
+		return true
 	})
 }
 
-// BandwithLimits return the per listener and per connection bandwith limits.
-func (l *limitedListener) BandwithLimits() (listenerLimit, connLimit Bandwidth) {
-	l.limitsMu.Lock()
-	defer l.limitsMu.Unlock()
-	return l.readLimiter.BandwithLimit(), l.bpsPerConnLimit
+// Limits return the per listener and per connection bandwith limits.
+func (l *limitedListener) Limits() (listenerLimit, connLimit Bandwidth) {
+	l.limitsMu.RLock()
+	defer l.limitsMu.RUnlock()
+	return l.readLimiter.Limit(), l.connLimit
 }
 
 // Conn is a generic stream-oriented network connection
@@ -170,38 +190,38 @@ type Conn interface {
 	// Conn implements the net.Conn interface.
 	net.Conn
 
-	// SetBandwithLimit sets the bandwith limit for future i/o ops.
-	SetBandwithLimit(bps Bandwidth)
+	// SetLimit sets the bandwith limit for future i/o ops.
+	SetLimit(bps Bandwidth)
 
-	// BandwithLimit returns the current bandwith limit.
-	BandwithLimit() Bandwidth
+	// Limit returns the current bandwith limit.
+	Limit() Bandwidth
 }
 
 type limitedConn struct {
 	net.Conn
-	r        *Reader
-	w        *Writer
+	r        LimitedReader
+	w        LimitedWriter
 	mu       sync.RWMutex
 	listener *limitedListener
 }
 
-// NewConn creates new rate  limiting connection.
-func NewConn(nc net.Conn, bps Bandwidth) Conn {
+// NewLimitedConn creates new rate  limiting connection.
+func NewLimitedConn(nc net.Conn, bps Bandwidth) Conn {
 	return &limitedConn{
 		Conn: nc,
-		r:    NewReader(nc, bps),
-		w:    NewWriter(nc, bps),
+		r:    NewLimitedReader(nc, bps),
+		w:    NewLimitedWriter(nc, bps),
 	}
 }
 
-func newConnWithListener(nc net.Conn, l *limitedListener) *limitedConn {
-	listenerReadLimiter := NewReaderWithSharedLimit(nc, &l.readLimiter)
-	listenerWriteLimiter := NewWriterWithSharedLimit(nc, &l.writeLimiter)
+func newLimitedListenerConn(nc net.Conn, l *limitedListener) *limitedConn {
+	listenerReadLimiter := &limitedReader{src: nc, limiter: &l.readLimiter}
+	listenerWriteLimiter := &limitedWriter{dst: nc, limiter: &l.writeLimiter}
 	return &limitedConn{
 		Conn:     nc,
 		listener: l,
-		r:        NewReader(listenerReadLimiter, l.bpsPerConnLimit),
-		w:        NewWriter(listenerWriteLimiter, l.bpsPerConnLimit),
+		r:        NewLimitedReader(listenerReadLimiter, l.connLimit),
+		w:        NewLimitedWriter(listenerWriteLimiter, l.connLimit),
 	}
 }
 
@@ -223,85 +243,78 @@ func (conn *limitedConn) Close() error {
 	return conn.Conn.Close()
 }
 
-// SetBandwithLimit sets the bandwith limit.
-func (conn *limitedConn) SetBandwithLimit(bps Bandwidth) {
+// SetLimit sets the bandwith limit.
+func (conn *limitedConn) SetLimit(bps Bandwidth) {
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
-	conn.r.SetBandwithLimit(bps)
-	conn.w.SetBandwithLimit(bps)
+	conn.r.SetReadLimit(bps)
+	conn.w.SetWriteLimit(bps)
 }
 
-// BandwithLimit returns the bandwith limit.
-func (conn *limitedConn) BandwithLimit() Bandwidth {
-	return conn.r.BandwithLimit()
-}
+// Limit returns the bandwith limit.
+func (conn *limitedConn) Limit() Bandwidth { return conn.r.ReadLimit() }
 
-type BandwidthLimiter struct {
-	limiter  rate.Limiter
+type limiter struct {
+	impl     rate.Limiter
 	mu       sync.RWMutex
 	bpsLimit Bandwidth
 }
 
-func NewBandwidthLimiter(bps Bandwidth) *BandwidthLimiter {
-	bl := new(BandwidthLimiter)
-	bl.limiter = *rate.NewLimiter(rate.Limit(bps), int(burstSizePolicy(bps)))
-	return bl
+func newLimiter(bps Bandwidth) *limiter {
+	return &limiter{
+		impl: *rate.NewLimiter(rate.Limit(bps), int(burstSizePolicy(bps))),
+	}
 }
 
-func (bl *BandwidthLimiter) SetBandwithLimit(bps Bandwidth) {
-	bl.mu.Lock()
-	defer bl.mu.Unlock()
-	bl.bpsLimit = bps
-	bl.limiter.SetLimit(rate.Limit(bps))
-	bl.limiter.SetBurst(int(burstSizePolicy(bps)))
+func (l *limiter) SetLimit(bps Bandwidth) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.bpsLimit = bps
+	l.impl.SetLimit(rate.Limit(bps))
+	l.impl.SetBurst(int(burstSizePolicy(bps)))
 }
 
-func (bl *BandwidthLimiter) BandwithLimit() Bandwidth {
+func (bl *limiter) Limit() Bandwidth {
 	bl.mu.RLock()
 	defer bl.mu.RUnlock()
 	return bl.bpsLimit
 }
 
-func (bl *BandwidthLimiter) waitBandwidth(want int) (int, error) {
-	// bl.mu.RLock()
-	// defer bl.mu.RUnlock()
-	bandwidth := bl.limiter.Burst()
+func (bl *limiter) waitBandwidth(want int) (int, error) {
+	bandwidth := bl.impl.Burst()
 	if bandwidth == 0 {
 		return 0, ErrNoBurstAvilable
 	}
 	if want < bandwidth {
 		bandwidth = want
 	}
-	if rsv := bl.limiter.ReserveN(time.Now(), bandwidth); rsv.OK() {
+	if rsv := bl.impl.ReserveN(time.Now(), bandwidth); rsv.OK() {
 		time.Sleep(rsv.Delay())
 		return bandwidth, nil
 	}
 	return 0, ErrNoBurstAvilable
 }
 
-// Default behavior for burst
 const (
-	BurstRateRecomended = 32 * KBps
-	BurstRateMax        = 5 * MBps
+	burstRateMaxTcpSegment = 64 * KBps
+	burstRateMTU           = 10 * 1500 * Bps
 )
 
 func burstSizePolicy(bps Bandwidth) Bandwidth {
-	burst := BurstRateRecomended
-
-	if burst > bps {
-		burst = bps
-		// For better smoothing of traffic aim for at least 8 burst in second
-		for i := 0; i < 4; i++ {
+	burst := bps
+	if bps > burstRateMTU {
+		// decent size of io
+		burst = bps * 0.00025
+		if burst < burstRateMTU {
+			burst = burstRateMTU
+		}
+	} else {
+		// small io
+		for i := 1; i < 4; i++ {
 			if x := burst / 2; x >= 16 {
 				burst = x
 			}
 		}
-	}
-	for burst*100 < bps {
-		burst *= 10
-	}
-	if BurstRateMax < burst {
-		burst = BurstRateMax
 	}
 	return burst
 }
