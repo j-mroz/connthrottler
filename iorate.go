@@ -296,8 +296,7 @@ func (bl *limiter) waitBandwidth(want int) (int, error) {
 }
 
 const (
-	burstRateMaxTcpSegment = 64 * KBps
-	burstRateMTU           = 10 * 1500 * Bps
+	burstRateMTU = 10 * 1500 * Bps
 )
 
 func burstSizePolicy(bps Bandwidth) Bandwidth {

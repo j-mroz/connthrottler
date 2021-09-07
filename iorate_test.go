@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"reflect"
 	"testing"
 	"time"
 
@@ -143,16 +142,13 @@ type readWriteBenchConfig struct {
 	bps         Bandwidth
 	chain       Bandwidth // enabled if not 0
 	payloadSize ByteSize
-	wantErr     bool
-	r           io.Reader
-	w           io.Writer
 }
 
 // Benchamarks for determining optimal optimal bps and burst ratio
 var readWriteBenchmarks = []readWriteBenchConfig{
 	{bps: 128 * Bps, payloadSize: 200 * B},
 	{bps: 1 * KBps, payloadSize: 4 * KB},
-	{bps: 1 * KBps, chain: 800 * Bps, payloadSize: 4 * KB, wantErr: false},
+	{bps: 1 * KBps, chain: 800 * Bps, payloadSize: 4 * KB},
 	{bps: 250 * KBps, chain: 200 * KBps, payloadSize: 4 * MB},
 	{bps: 250 * KBps, payloadSize: 4 * MB},
 	{bps: 1 * MBps, payloadSize: 4 * MB},
@@ -428,10 +424,3 @@ func (mc *MockConn) RemoteAddr() net.Addr               { return nil }
 func (mc *MockConn) SetDeadline(t time.Time) error      { return nil }
 func (mc *MockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (ms *MockConn) SetWriteDeadline(t time.Time) error { return nil }
-
-func assertEqual(tb testing.TB, x, y interface{}, fmt string, args ...interface{}) {
-	tb.Helper()
-	if !reflect.DeepEqual(x, y) {
-		tb.Errorf(fmt, args...)
-	}
-}
