@@ -70,6 +70,27 @@ func TestReader_Read_WrappedReaders(t *testing.T) {
 
 	assert.Equalf(t, expectRead, read, "Reader.Read() wrong read size")
 	assert.NoError(t, err)
+	assert.Equal(t, payload[:read], buff[:read])
+}
+
+func TestWriter_Write_WrappedWriters(t *testing.T) {
+	var writeSink bytes.Buffer
+
+	payload := []byte("0123456789")
+
+	//  Writter is expected to write all
+	expectWritten := 10
+
+	writer1 := NewLimitedWriter(&writeSink, 15*Bps)
+	writer2 := NewLimitedWriter(writer1, 5*Bps)
+	writer3 := NewLimitedWriter(writer2, 10*Bps)
+
+	written, err := writer3.Write(payload)
+
+	assert.Equalf(t, expectWritten, written, "Write.Write() wrong read size")
+	assert.Equal(t, payload, writeSink.Bytes())
+
+	assert.NoError(t, err)
 }
 
 func TestWriter_Write(t *testing.T) {
@@ -335,10 +356,10 @@ func TestConn_Read_OnBpsChange(t *testing.T) {
 	}{
 		{
 			given{payload: "", bpsChangeFrom: 0 * KBps, bpsChangeTo: 1 * KBps},
-			expect{fullRead: true, err1: ErrNoBurstAvilable, err2: nil},
+			expect{fullRead: true, err1: ErrNoBurstAvilable, err2: io.EOF},
 		}, {
 			given{payload: "", bpsChangeFrom: 1 * KBps, bpsChangeTo: 0 * KBps},
-			expect{fullRead: true, err1: nil, err2: ErrNoBurstAvilable},
+			expect{fullRead: true, err1: io.EOF, err2: ErrNoBurstAvilable},
 		}, {
 			given{payload: "01234567890", bpsChangeFrom: 0 * KBps, bpsChangeTo: 1 * KBps},
 			expect{fullRead: true, err1: ErrNoBurstAvilable, err2: nil},
@@ -356,11 +377,13 @@ func TestConn_Read_OnBpsChange(t *testing.T) {
 			tt.given.payload, tt.given.bpsChangeFrom, tt.given.bpsChangeTo)
 
 		t.Run(name, func(t *testing.T) {
-			sourceConn := MockConn{B: *bytes.NewBuffer([]byte(tt.given.payload))}
-			expectN := sourceConn.B.Len()
-			conn := NewLimitedConn(&sourceConn, tt.given.bpsChangeFrom)
+			payloadBuff := []byte(tt.given.payload)
+			mockConn := MockConn{B: *bytes.NewBuffer(payloadBuff)}
+			expectReadSize := mockConn.B.Len()
 
-			readBuff := make([]byte, expectN)
+			conn := NewLimitedConn(&mockConn, tt.given.bpsChangeFrom)
+
+			readBuff := make([]byte, expectReadSize+10)
 			n, err := conn.Read(readBuff)
 			allReadsSize := n
 
@@ -368,17 +391,19 @@ func TestConn_Read_OnBpsChange(t *testing.T) {
 
 			conn.SetLimit(tt.given.bpsChangeTo)
 
-			n, err = conn.Read(readBuff)
+			n, err = conn.Read(readBuff[n:])
 			allReadsSize += n
-			fullRead := (allReadsSize == expectN)
+			fullRead := (allReadsSize == expectReadSize)
 
 			assert.ErrorIs(t, err, tt.expect.err2, "Conn.Read() error")
 			if tt.expect.fullRead && !fullRead {
-				t.Errorf("Conn.Read() = %v, want %v", n, expectN)
+				t.Errorf("Conn.Read() = %v, want %v", n, expectReadSize)
 			}
 			if !tt.expect.fullRead && fullRead {
 				t.Errorf("Conn.Read() = %v, did not expect full read", n)
 			}
+
+			assert.Equal(t, payloadBuff[:allReadsSize], readBuff[:allReadsSize])
 		})
 	}
 }

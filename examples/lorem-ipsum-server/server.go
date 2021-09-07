@@ -21,7 +21,7 @@ deserunt mollit anim id est laborum.`
 func loremIpsumHandler(w http.ResponseWriter, req *http.Request) {
 	log.Println(req)
 
-	buffered := bufio.NewWriterSize(w, 2*1024*1024)
+	buffered := bufio.NewWriterSize(w, 4*1024*1024)
 	var err error
 	for err == nil {
 		_, err = io.WriteString(buffered, loremIpsum)
@@ -30,7 +30,9 @@ func loremIpsumHandler(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
-	log.Println("Try me: curl http://localhost:9991/lorem-ipsum")
+
+	log.Println("Read me at http://localhost:9991/lorem-ipsum -O /dev/null")
+
 	http.HandleFunc("/lorem-ipsum", loremIpsumHandler)
 
 	listener, err := net.Listen("tcp", "localhost:9991")
