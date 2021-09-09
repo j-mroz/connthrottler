@@ -73,7 +73,13 @@ func NewLimitedReader(r io.Reader, bps Bandwidth) LimitedReader {
 
 // Read calls wrapped io.Reader, but limits the throughput.
 func (r *limitedReader) Read(b []byte) (n int, err error) {
-	allowed, err := r.limiter.waitBandwidth(len(b))
+	// Chained limited readerrs should not wait needlesly
+	allowed := len(b)
+	limitedSrc, limitedSrcOk := r.src.(*limitedReader)
+	if limitedSrcOk && limitedSrc.limiter.Burst() < allowed {
+		allowed = limitedSrc.limiter.Burst()
+	}
+	allowed, err = r.limiter.waitBandwidth(allowed)
 	if err != nil {
 		return 0, err
 	}
@@ -152,7 +158,6 @@ func (l *limitedListener) Accept() (net.Conn, error) {
 	if err == nil {
 		l.limitsMu.RLock()
 		limitedConn = newLimitedListenerConn(nc, l)
-		limitedConn.SetLimit(l.connLimit)
 		l.connections.Store(limitedConn, 1)
 		l.limitsMu.RUnlock()
 	}
@@ -262,7 +267,8 @@ type limiter struct {
 
 func newLimiter(bps Bandwidth) *limiter {
 	return &limiter{
-		impl: *rate.NewLimiter(rate.Limit(bps), int(burstSizePolicy(bps))),
+		impl:     *rate.NewLimiter(rate.Limit(bps), int(burstSizePolicy(bps))),
+		bpsLimit: bps,
 	}
 }
 
@@ -272,6 +278,14 @@ func (l *limiter) SetLimit(bps Bandwidth) {
 	l.bpsLimit = bps
 	l.impl.SetLimit(rate.Limit(bps))
 	l.impl.SetBurst(int(burstSizePolicy(bps)))
+}
+
+func (l *limiter) SetBurst(burst int) {
+	l.impl.SetBurst(burst)
+}
+
+func (l *limiter) Burst() int {
+	return l.impl.Burst()
 }
 
 func (bl *limiter) Limit() Bandwidth {
@@ -296,7 +310,7 @@ func (bl *limiter) waitBandwidth(want int) (int, error) {
 }
 
 const (
-	burstRateMTU = 10 * 1500 * Bps
+	burstRateMTU = 512 * Bps
 )
 
 func burstSizePolicy(bps Bandwidth) Bandwidth {
@@ -306,6 +320,7 @@ func burstSizePolicy(bps Bandwidth) Bandwidth {
 		burst = bps * 0.00025
 		if burst < burstRateMTU {
 			burst = burstRateMTU
+			// burst = 32 * KBps
 		}
 	} else {
 		// small io
@@ -315,5 +330,6 @@ func burstSizePolicy(bps Bandwidth) Bandwidth {
 			}
 		}
 	}
+	// fmt.Printf("burstSizePolicy %s\n", burst)
 	return burst
 }
