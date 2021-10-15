@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/j-mroz/iorate"
+	"github.com/jrsmroz/iorate"
 )
 
 const loremIpsum = `Lorem ipsum dolor sit amet, 
